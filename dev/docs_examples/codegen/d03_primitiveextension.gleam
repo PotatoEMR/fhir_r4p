@@ -5,42 +5,8 @@ import gleam/json
 import gleam/list
 import gleam/option.{Some}
 
-const name_json = "
-  {
-    \"use\" : \"official\",
-    \"family\" : \"van Hentenryck\",
-    \"_family\" : {
-      \"extension\" : [{
-        \"url\" : \"http://hl7.org/fhir/StructureDefinition/humanname-own-prefix\",
-        \"valueString\" : \"van\"
-      }, {
-        \"url\" : \"http://hl7.org/fhir/StructureDefinition/humanname-own-name\",
-        \"valueString\" : \"Hentenryck\"
-      }]
-    },
-    \"given\" : [\"Karen\"]
-  }
-"
-
-const questionnaireresponse_json = "
-  {
-    \"resourceType\" : \"QuestionnaireResponse\",
-    \"status\" : \"completed\",
-    \"authored\" : \"2024-01-01T00:00:00Z\",
-    \"_questionnaire\": {
-      \"extension\": [
-        {
-          \"url\": \"http://hl7.org/fhir/StructureDefinition/display\",
-          \"valueString\": \"Lifelines\"
-        }
-      ]
-    }
-  }
-"
-
 pub fn main() {
-  let assert Ok(name) =
-    json.parse(name_json, complex_types.humanname_decoder())
+  let assert Ok(name) = json.parse(name_json, complex_types.humanname_decoder())
   let assert Some(valuesets.NameuseOfficial) = name.use_.value
   let assert Some(family) = name.family.value
   assert family == "van Hentenryck"
@@ -78,3 +44,36 @@ pub fn main() {
   )) = display.ext
   assert display_value == "Lifelines"
 }
+
+const name_json = "
+  {
+    \"use\" : \"official\",
+    \"family\" : \"van Hentenryck\",
+    \"_family\" : {
+      \"extension\" : [{
+        \"url\" : \"http://hl7.org/fhir/StructureDefinition/humanname-own-prefix\",
+        \"valueString\" : \"van\"
+      }, {
+        \"url\" : \"http://hl7.org/fhir/StructureDefinition/humanname-own-name\",
+        \"valueString\" : \"Hentenryck\"
+      }]
+    },
+    \"given\" : [\"Karen\"]
+  }
+"
+
+const questionnaireresponse_json = "
+  {
+    \"resourceType\" : \"QuestionnaireResponse\",
+    \"status\" : \"completed\",
+    \"authored\" : \"2024-01-01T00:00:00Z\",
+    \"_questionnaire\": {
+      \"extension\": [
+        {
+          \"url\": \"http://hl7.org/fhir/StructureDefinition/display\",
+          \"valueString\": \"Lifelines\"
+        }
+      ]
+    }
+  }
+"

@@ -1,5 +1,5 @@
 name = "fhir_r4p"
-version = "0.7.0"
+version = "0.8.0"
 
 description = "r4 primitive extensions - see https://hexdocs.pm/fhir/ "
 licences = ["MIT"]

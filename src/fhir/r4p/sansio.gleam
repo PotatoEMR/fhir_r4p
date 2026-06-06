@@ -125,10 +125,51 @@ fn create_base_req(
 pub type ErrResp {
   ///got json but could not parse it, probably a missing required field
   ErrParseJson(json.DecodeError)
-  ///did not get resource json, often server eg nginx gives basic html response
-  ErrNotJson(Response(String))
+  ///did not get resource json, often server eg nginx gives basic html response or empty body with http headers/status code
+  ErrServer(Response(String))
   ///got operationoutcome error from fhir server
   ErrOperationoutcome(resources.Operationoutcome)
+}
+
+/// convert error response to string,
+/// either from a server error response
+/// or problem parsing server's returned resource
+pub fn err_resp_to_string(err: ErrResp) -> String {
+  case err {
+    ErrServer(err) -> "server error: " <> resp_to_string(err)
+    ErrOperationoutcome(err) ->
+      case err.issue.rest {
+        [] ->
+          "OperationOutcome: "
+          <> err.issue.first
+          |> resources.operationoutcome_issue_to_json
+          |> json.to_string
+        _ ->
+          "OperationOutcome issues: "
+          <> [err.issue.first, ..err.issue.rest]
+          |> list.map(resources.operationoutcome_issue_to_json)
+          |> json.preprocessed_array
+          |> json.to_string
+      }
+    ErrParseJson(err) ->
+      "Error parsing returned resource: "
+      <> case err {
+        json.UnexpectedEndOfInput -> "unexpected end of input"
+        json.UnexpectedByte(err) -> "unexpected byte: " <> err
+        json.UnexpectedSequence(err) -> "unexpected sequence: " <> err
+        json.UnableToDecode(errors) ->
+          list.map(errors, fn(error) {
+            let decode.DecodeError(expected:, found:, path:) = error
+            "expected "
+            <> expected
+            <> " but found "
+            <> found
+            <> " at "
+            <> string.join(path, "/")
+          })
+          |> string.join(";")
+      }
+  }
 }
 
 pub type ErrReq {
@@ -136,11 +177,13 @@ pub type ErrReq {
   ErrNoId
 }
 
+pub const err_req_to_string = "the resource you're using has no id, but a resource id is needed for this operation"
+
 pub fn any_create_req(
   resource_json: Json,
   res_type: resources.ResourceType,
   client: FhirClient,
-) {
+) -> Request(Option(Json)) {
   client.basereq
   |> request.set_path(
     string.concat([
@@ -159,7 +202,7 @@ pub fn any_read_req(
   id: String,
   res_type: resources.ResourceType,
   client: FhirClient,
-) {
+) -> Request(Option(Json)) {
   client.basereq
   |> request.set_path(
     string.concat([
@@ -277,84 +320,56 @@ pub fn any_operation_req(
 }
 
 /// decodes an Ok(resource) of given decoder type
-/// or Error(ErrOperationoutcome(operationoutcome))
-///
-/// if resp.body is not a JSON, returns Error(ErrNotJson(resp))
-pub fn any_resp(
+/// or an Error:
+/// - decoder error attempting to decode resource
+/// - Operationoutcome error
+/// - non json http response
+pub fn any_response(
   resp: Response(String),
-  resource_dec: decode.Decoder(a),
-  resource_type: resources.ResourceType,
-) -> Result(a, ErrResp) {
-  let resource_type = resources.resource_type_to_string(resource_type)
-  case
-    resp.body
-    |> json.parse({
-      use tag <- decode.field("resourceType", decode.string)
-      case tag == resource_type {
-        True -> resource_dec |> decode.map(Ok)
-        False ->
-          case tag == "OperationOutcome" {
-            True ->
-              resources.operationoutcome_decoder()
-              |> decode.map(fn(oo) { Error(ErrOperationoutcome(oo)) })
-            // if resourceType tag is neither desired res type or oo,
-            // don't even bother trying to decode
-            False ->
-              decode.failure(Error(ErrNotJson(resp)), "")
-              |> decode.map_errors(fn(_errs) {
-                [
-                  decode.DecodeError(
-                    expected: resource_type <> " or OperationOutcome",
-                    found: tag,
-                    path: ["resourceType"],
-                  ),
-                ]
-              })
-          }
-      }
-    })
-  {
-    Ok(decoded) -> decoded
-    Error(json_err) ->
-      case json_err {
-        json.UnableToDecode(_) -> Error(ErrParseJson(json_err))
-        _ -> Error(ErrNotJson(resp))
-      }
+  resource_decoder: decode.Decoder(resource_type),
+) -> Result(resource_type, ErrResp) {
+  case resp.status < 300 {
+    True ->
+      resp.body
+      |> json.parse(resource_decoder)
+      |> result.map_error(ErrParseJson)
+    False ->
+      Error(case resp.body |> json.parse(resources.operationoutcome_decoder()) {
+        Ok(decoded_oo) -> ErrOperationoutcome(decoded_oo)
+        Error(_) -> ErrServer(resp)
+      })
+    // here if operationoutcome fails to decode, we discard the error
+    // and instead return response with body as string
+    // technically, body might have been a malformed operationoutcome
+    // which we could maybe check for with Content-Type header
+    // and if it's application/fhir+json then keep operationdecoder outcome
+    // that seems fiddly though whereas this is pretty clean
+    // and I mean if you have a literal malformed operationoutcome error idk
+    // it's an error on an error what are you even going to do with that
+  }
+}
+
+//
+pub fn delete_response(
+  resp: Response(String),
+) -> Result(OperationoutcomeOrHTTP, ErrResp) {
+  case resp.status < 300 {
+    True ->
+      Ok(case resp.body |> json.parse(resources.operationoutcome_decoder()) {
+        Ok(decoded_oo) -> SuccessOperationoutcome(decoded_oo)
+        Error(_) -> SuccessHttpResponse(response.Response(..resp, body: Nil))
+      })
+    False ->
+      Error(case resp.body |> json.parse(resources.operationoutcome_decoder()) {
+        Ok(decoded_oo) -> ErrOperationoutcome(decoded_oo)
+        Error(_) -> ErrServer(resp)
+      })
   }
 }
 
 pub type OperationoutcomeOrHTTP {
   SuccessOperationoutcome(resources.Operationoutcome)
-  SuccessHttpResponse(Response(String))
-}
-
-/// returns Ok if http status code 200-299, otherwise Error,
-/// and can return an OperationOutcome or HTTP response,
-/// depending on if server sense OperationOutcome or empty body
-pub fn http_or_operationoutcome_resp(
-  resp: Response(String),
-) -> Result(OperationoutcomeOrHTTP, ErrResp) {
-  case resp.body {
-    "" ->
-      case resp.status < 300 {
-        True -> Ok(SuccessHttpResponse(resp))
-        False -> Error(ErrNotJson(resp))
-      }
-    _ -> {
-      case resp.body |> json.parse(resources.operationoutcome_decoder()) {
-        Ok(decoded_oo) ->
-          case resp.status < 300 {
-            True -> Ok(SuccessOperationoutcome(decoded_oo))
-            False -> Error(ErrOperationoutcome(decoded_oo))
-          }
-        Error(json_err) ->
-          case json_err {
-            json.UnableToDecode(_) -> Error(ErrParseJson(json_err))
-            _ -> Error(ErrNotJson(resp))
-          }
-      }
-    }
-  }
+  SuccessHttpResponse(Response(Nil))
 }
 
 pub type PostBundleType {
@@ -369,7 +384,7 @@ pub fn batch_req(
   reqs: List(Request(Option(Json))),
   bundle_type: PostBundleType,
   client: FhirClient,
-) {
+) -> Request(Option(Json)) {
   // each request in list already has serialized json body
   // so we have to construct bundle json as json
   // rather than type safe bundle Bundle variable then serialize
@@ -463,14 +478,12 @@ pub fn req_to_string(req: Request(Option(Json))) -> String {
   //kind of duplicating but want to put body at end and maybe this performs better? idk maybe doesn't matter
   case req.body {
     Some(body) -> [
-      "send request:",
       "to uri:  " <> to_uri,
       "method:  " <> method,
       "headers: " <> headers,
       "body:    " <> json.to_string(body),
     ]
     None -> [
-      "send request:",
       "to uri:  " <> to_uri,
       "method:  " <> method,
       "headers: " <> headers,
@@ -486,7 +499,6 @@ pub fn resp_to_string(resp: Response(String)) -> String {
     |> list.map(fn(hdr) { hdr.0 <> ": " <> hdr.1 })
     |> string.join("; ")
   [
-    "receive response:",
     "status:  " <> status,
     "headers: " <> headers,
     "body:    " <> resp.body,
@@ -650,7 +662,7 @@ pub type GroupedResources {
   )
 }
 
-pub fn groupedresources_new() {
+pub fn groupedresources_new() -> GroupedResources {
   GroupedResources(
     account: [],
     activitydefinition: [],
@@ -800,7 +812,9 @@ pub fn groupedresources_new() {
   )
 }
 
-pub fn bundle_to_groupedresources(from bundle: resources.Bundle) {
+pub fn bundle_to_groupedresources(
+  from bundle: resources.Bundle,
+) -> GroupedResources {
   list.fold(
     from: groupedresources_new(),
     over: bundle.entry,
